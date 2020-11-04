@@ -27,6 +27,8 @@ import (
 	"strings"
 	"sync"
 
+	"k8s.io/klog"
+
 	"github.com/blang/semver"
 	"github.com/spf13/pflag"
 	"k8s.io/apimachinery/pkg/version"
@@ -41,6 +43,7 @@ import (
 const (
 	UbuntuOSType   = "ubuntu"
 	RaspbianOSType = "raspbian"
+	DebianOSType   = "debian"
 	CentOSType     = "centos"
 
 	KubeEdgeDownloadURL          = "https://github.com/kubeedge/kubeedge/releases/download"
@@ -182,7 +185,7 @@ func GetOSVersion() string {
 //GetOSInterface helps in returning OS specific object which implements OSTypeInstaller interface.
 func GetOSInterface() types.OSTypeInstaller {
 	switch GetOSVersion() {
-	case UbuntuOSType, RaspbianOSType:
+	case UbuntuOSType, RaspbianOSType, DebianOSType:
 		return &UbuntuOS{}
 	case CentOSType:
 		return &CentOS{}
@@ -325,7 +328,17 @@ func checkKubernetesVersion(serverVersion *version.Info) error {
 //installKubeEdge downloads the provided version of KubeEdge.
 //Untar's in the specified location /etc/kubeedge/ and then copies
 //the binary to excecutables' path (eg: /usr/local/bin)
-func installKubeEdge(componentType types.ComponentType, arch string, version semver.Version) error {
+func installKubeEdge(options types.InstallOptions, arch string, version semver.Version) error {
+	// create the storage path of the kubeedge installation packages
+	if options.TarballPath == "" {
+		options.TarballPath = KubeEdgePath
+	} else {
+		err := os.MkdirAll(options.TarballPath, os.ModePerm)
+		if err != nil {
+			return fmt.Errorf("not able to create %s folder path", options.TarballPath)
+		}
+	}
+
 	err := os.MkdirAll(KubeEdgePath, os.ModePerm)
 	if err != nil {
 		return fmt.Errorf("not able to create %s folder path", KubeEdgePath)
@@ -335,67 +348,57 @@ func installKubeEdge(componentType types.ComponentType, arch string, version sem
 		arch = "arm"
 	}
 
-	//Check if the same version exists, then skip the download and just untar and continue
-	//TODO: It is always better to have the checksum validation of the downloaded file
-	//and checksum available at download URL. So that both can be compared to see if
+	//Check if the same version exists, then skip the download and just checksum for it
+	//and if checksum failed, there will be a option to choose to continue to untar or quit.
+	//checksum available at download URL. So that both can be compared to see if
 	//proper download has happened and then only proceed further.
 	//Currently it is missing and once checksum is in place, checksum check required
 	//to be added here.
 	dirname := fmt.Sprintf("kubeedge-v%s-linux-%s", version, arch)
 	filename := fmt.Sprintf("kubeedge-v%s-linux-%s.tar.gz", version, arch)
 	checksumFilename := fmt.Sprintf("checksum_kubeedge-v%s-linux-%s.tar.gz.txt", version, arch)
-	filePath := fmt.Sprintf("%s%s", KubeEdgePath, filename)
+	filePath := fmt.Sprintf("%s/%s", options.TarballPath, filename)
 	if _, err = os.Stat(filePath); err == nil {
-		fmt.Println("Expected or Default KubeEdge version", version, "is already downloaded")
+		fmt.Printf("Expected or Default KubeEdge version %v is already downloaded and will checksum for it. \n", version)
+		if success, _ := checkSum(filename, checksumFilename, version, options.TarballPath); !success {
+			fmt.Printf("%v in your path checksum failed and do you want to delete this file and try to download again? \n", filename)
+			for {
+				confirm, err := askForconfirm()
+				if err != nil {
+					fmt.Println(err.Error())
+					continue
+				}
+				if confirm {
+					cmdStr := fmt.Sprintf("cd %s && rm -f %s", options.TarballPath, filename)
+					if _, err := runCommandWithStdout(cmdStr); err != nil {
+						return err
+					}
+					klog.Infof("%v have been deleted and will try to download again", filename)
+					if err := retryDownload(filename, checksumFilename, version, options.TarballPath); err != nil {
+						return err
+					}
+				} else {
+					klog.Warningf("failed to checksum and will continue to install.")
+				}
+				break
+			}
+		} else {
+			klog.Infof("Expected or Default KubeEdge version %v is already downloaded and checksum successfully.", version)
+		}
 	} else if !os.IsNotExist(err) {
 		return err
 	} else {
-		try := 0
-		for ; try < downloadRetryTimes; try++ {
-			//Download the tar from repo
-			dwnldURL := fmt.Sprintf("cd %s && wget -k --no-check-certificate --progress=bar:force %s/v%s/%s",
-				KubeEdgePath, KubeEdgeDownloadURL, version, filename)
-			if _, err := runCommandWithShell(dwnldURL); err != nil {
-				return err
-			}
-
-			//Verify the tar with checksum
-			fmt.Printf("%s checksum: \n", filename)
-			cmdStr := fmt.Sprintf("cd %s && sha512sum %s | awk '{split($0,a,\"[ ]\"); print a[1]}'", KubeEdgePath, filename)
-			desiredChecksum, err := runCommandWithStdout(cmdStr)
-			if err != nil {
-				return err
-			}
-
-			fmt.Printf("%s content: \n", checksumFilename)
-			cmdStr = fmt.Sprintf("wget -qO- %s/v%s/%s", KubeEdgeDownloadURL, version, checksumFilename)
-			actualChecksum, err := runCommandWithStdout(cmdStr)
-			if err != nil {
-				return err
-			}
-
-			if desiredChecksum == actualChecksum {
-				break
-			} else {
-				fmt.Printf("Failed to verify the checksum of %s, try to download it again ... \n\n", filename)
-				//Cleanup the downloaded files
-				cmdStr = fmt.Sprintf("cd %s && rm -f %s", KubeEdgePath, filename)
-				_, err := runCommandWithStdout(cmdStr)
-				if err != nil {
-					return err
-				}
-			}
+		if err := retryDownload(filename, checksumFilename, version, options.TarballPath); err != nil {
+			return err
 		}
-		if try == downloadRetryTimes {
-			return fmt.Errorf("failed to download %s", filename)
-		}
+		return nil
 	}
 
 	/*
 		When installing edgecore, if the version is >= 1.1,
 		download the edgecore.service file from the KubeEdge/build/tools/ and place it in /etc/kubeedge/ acc.
 	*/
-	if componentType == types.EdgeCore {
+	if options.ComponentType == types.EdgeCore {
 		strippedVersion := fmt.Sprintf("%d.%d", version.Major, version.Minor)
 
 		//	No need to download if the version is less than 1.1 (or 1.1.0)
@@ -410,7 +413,7 @@ func installKubeEdge(componentType types.ComponentType, arch string, version sem
 
 			urlForServiceFile := fmt.Sprintf(EdgeCoreServiceFileURL, strippedVersion, edgecoreServiceFileName)
 			for ; try < downloadRetryTimes; try++ {
-				cmdStr := fmt.Sprintf("cd %s && sudo wget -k --no-check-certificate %s", KubeEdgePath, urlForServiceFile)
+				cmdStr := fmt.Sprintf("cd %s && sudo -E wget -k --no-check-certificate %s", KubeEdgePath, urlForServiceFile)
 				_, err := runCommandWithStdout(cmdStr)
 				if err != nil {
 					return err
@@ -426,29 +429,29 @@ func installKubeEdge(componentType types.ComponentType, arch string, version sem
 	// Compatible with 1.0.0
 	var untarFileAndMoveCloudCore, untarFileAndMoveEdgeCore string
 	if version.GE(semver.MustParse("1.1.0")) {
-		if componentType == types.CloudCore {
+		if options.ComponentType == types.CloudCore {
 			untarFileAndMoveCloudCore = fmt.Sprintf("cd %s && tar -C %s -xvzf %s && cp %s/%s/cloud/cloudcore/%s %s/",
-				KubeEdgePath, KubeEdgePath, filename, KubeEdgePath, dirname, KubeCloudBinaryName, KubeEdgeUsrBinPath)
+				options.TarballPath, options.TarballPath, filename, options.TarballPath, dirname, KubeCloudBinaryName, KubeEdgeUsrBinPath)
 		}
-		if componentType == types.EdgeCore {
-			untarFileAndMoveEdgeCore = fmt.Sprintf("cd %s && tar -C %s -xvzf %s && cp %s%s/edge/%s %s/",
-				KubeEdgePath, KubeEdgePath, filename, KubeEdgePath, dirname, KubeEdgeBinaryName, KubeEdgePath)
+		if options.ComponentType == types.EdgeCore {
+			untarFileAndMoveEdgeCore = fmt.Sprintf("cd %s && tar -C %s -xvzf %s && cp %s/%s/edge/%s %s/",
+				options.TarballPath, options.TarballPath, filename, options.TarballPath, dirname, KubeEdgeBinaryName, KubeEdgePath)
 		}
 	} else {
-		untarFileAndMoveEdgeCore = fmt.Sprintf("cd %s && tar -C %s -xvzf %s && cp %skubeedge/edge/%s %s/.",
-			KubeEdgePath, KubeEdgePath, filename, KubeEdgePath, KubeEdgeBinaryNamePre, KubeEdgePath)
-		untarFileAndMoveCloudCore = fmt.Sprintf("cd %s && cp %skubeedge/cloud/%s %s/.",
-			KubeEdgePath, KubeEdgePath, KubeCloudBinaryName, KubeEdgeUsrBinPath)
+		untarFileAndMoveEdgeCore = fmt.Sprintf("cd %s && tar -C %s -xvzf %s && cp %s/kubeedge/edge/%s %s/.",
+			options.TarballPath, options.TarballPath, filename, options.TarballPath, KubeEdgeBinaryNamePre, KubeEdgePath)
+		untarFileAndMoveCloudCore = fmt.Sprintf("cd %s && cp %s/kubeedge/cloud/%s %s/.",
+			options.TarballPath, options.TarballPath, KubeCloudBinaryName, KubeEdgeUsrBinPath)
 	}
 
-	if componentType == types.CloudCore {
+	if options.ComponentType == types.CloudCore {
 		stdout, err := runCommandWithStdout(untarFileAndMoveCloudCore)
 		if err != nil {
 			return err
 		}
 		fmt.Println(stdout)
 	}
-	if componentType == types.EdgeCore {
+	if options.ComponentType == types.EdgeCore {
 		stdout, err := runCommandWithStdout(untarFileAndMoveEdgeCore)
 		if err != nil {
 			return err
@@ -540,7 +543,7 @@ func killKubeEdgeBinary(proc string) error {
 			// remove the system service.
 			binExec = fmt.Sprintf("sudo systemctl stop %s.service && sudo rm /etc/systemd/system/%s.service && sudo systemctl daemon-reload && systemctl reset-failed", serviceName, serviceName)
 		} else {
-			binExec = fmt.Sprintf("kill -9 $(ps aux | grep '[%s]%s' | awk '{print $2}')", proc[0:1], proc[1:])
+			binExec = fmt.Sprintf("kill $(ps aux | grep '[%s]%s' | awk '{print $2}')", proc[0:1], proc[1:])
 		}
 	}
 	if _, err := runCommandWithStdout(binExec); err != nil {
@@ -594,4 +597,91 @@ func hasSystemd() bool {
 	}
 
 	return false
+}
+
+func checkSum(filename, checksumFilename string, version semver.Version, tarballPath string) (bool, error) {
+	//Verify the tar with checksum
+	fmt.Printf("%s checksum: \n", filename)
+	cmdStr := fmt.Sprintf("cd %s && sha512sum %s | awk '{split($0,a,\"[ ]\"); print a[1]}'", tarballPath, filename)
+	actualChecksum, err := runCommandWithStdout(cmdStr)
+	if err != nil {
+		return false, err
+	}
+
+	fmt.Printf("%s content: \n", checksumFilename)
+	cmdStr = fmt.Sprintf("wget -qO- %s/v%s/%s", KubeEdgeDownloadURL, version, checksumFilename)
+	desiredChecksum, err := runCommandWithStdout(cmdStr)
+	if err != nil {
+		return false, err
+	}
+
+	if desiredChecksum != actualChecksum {
+		fmt.Printf("Failed to verify the checksum of %s, try to download it again ... \n\n", filename)
+		//Cleanup the downloaded files
+		cmdStr = fmt.Sprintf("cd %s && rm -f %s", tarballPath, filename)
+		_, err = runCommandWithStdout(cmdStr)
+		return false, err
+	}
+	return true, nil
+}
+
+func retryDownload(filename, checksumFilename string, version semver.Version, tarballPath string) error {
+	try := 0
+	for ; try < downloadRetryTimes; try++ {
+		//Download the tar from repo
+		dwnldURL := fmt.Sprintf("cd %s && wget -k --no-check-certificate --progress=bar:force %s/v%s/%s",
+			tarballPath, KubeEdgeDownloadURL, version, filename)
+		if _, err := runCommandWithShell(dwnldURL); err != nil {
+			return err
+		}
+
+		//Verify the tar with checksum
+		fmt.Printf("%s checksum: \n", filename)
+		cmdStr := fmt.Sprintf("cd %s && sha512sum %s | awk '{split($0,a,\"[ ]\"); print a[1]}'", tarballPath, filename)
+		actualChecksum, err := runCommandWithStdout(cmdStr)
+		if err != nil {
+			return err
+		}
+
+		fmt.Printf("%s content: \n", checksumFilename)
+		cmdStr = fmt.Sprintf("wget -qO- %s/v%s/%s", KubeEdgeDownloadURL, version, checksumFilename)
+		desiredChecksum, err := runCommandWithStdout(cmdStr)
+		if err != nil {
+			return err
+		}
+
+		if desiredChecksum != actualChecksum {
+			fmt.Printf("Failed to verify the checksum of %s, try to download it again ... \n\n", filename)
+			//Cleanup the downloaded files
+			cmdStr = fmt.Sprintf("cd %s && rm -f %s", tarballPath, filename)
+			if _, err := runCommandWithStdout(cmdStr); err != nil {
+				return err
+			}
+		} else {
+			break
+		}
+	}
+	if try == downloadRetryTimes {
+		return fmt.Errorf("failed to download %s", filename)
+	}
+	return nil
+}
+
+func askForconfirm() (bool, error) {
+	var s string
+
+	fmt.Println("[y/N]: ")
+	if _, err := fmt.Scan(&s); err != nil {
+		return false, err
+	}
+
+	s = strings.ToLower(strings.TrimSpace(s))
+
+	if s == "y" {
+		return true, nil
+	} else if s == "n" {
+		return false, nil
+	} else {
+		return false, fmt.Errorf("Invalid Input")
+	}
 }

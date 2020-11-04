@@ -28,6 +28,8 @@ type InitOptions struct {
 	KubeConfig       string
 	Master           string
 	AdvertiseAddress string
+	DNS              string
+	TarballPath      string
 }
 
 //JoinOptions has the kubeedge cloud init information filled by CLI
@@ -36,11 +38,11 @@ type JoinOptions struct {
 	CertPath              string
 	CloudCoreIPPort       string
 	EdgeNodeName          string
-	InterfaceName         string
 	RuntimeType           string
 	RemoteRuntimeEndpoint string
 	Token                 string
 	CertPort              string
+	CGroupDriver          string
 }
 
 type ResetOptions struct {
@@ -80,6 +82,12 @@ const (
 	EdgeCore  ComponentType = "edgecore"
 )
 
+// InstallOptions is defined to know the options for installing kubeedge
+type InstallOptions struct {
+	ComponentType ComponentType
+	TarballPath   string
+}
+
 //ToolsInstaller interface for tools with install and teardown methods.
 type ToolsInstaller interface {
 	InstallTools() error
@@ -90,8 +98,8 @@ type ToolsInstaller interface {
 type OSTypeInstaller interface {
 	InstallMQTT() error
 	IsK8SComponentInstalled(string, string) error
-	InstallKubeEdge(ComponentType) error
 	SetKubeEdgeVersion(version semver.Version)
+	InstallKubeEdge(InstallOptions) error
 	RunEdgeCore() error
 	KillKubeEdgeBinary(string) error
 	IsKubeEdgeProcessRunning(string) (bool, error)
@@ -229,7 +237,6 @@ type ControllerSt struct {
 type EdgeDSt struct {
 	RegisterNodeNamespace             string `yaml:"register-node-namespace"`
 	HostnameOverride                  string `yaml:"hostname-override"`
-	InterfaceName                     string `yaml:"interface-name"`
 	NodeStatusUpdateFrequency         uint16 `yaml:"node-status-update-frequency"`
 	DevicePluginEnabled               bool   `yaml:"device-plugin-enabled"`
 	GPUPluginEnabled                  bool   `yaml:"gpu-plugin-enabled"`

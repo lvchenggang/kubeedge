@@ -19,6 +19,8 @@ import (
 type KubeCloudInstTool struct {
 	Common
 	AdvertiseAddress string
+	DNSName          string
+	TarballPath      string
 }
 
 // InstallTools downloads KubeEdge for the specified version
@@ -27,7 +29,12 @@ func (cu *KubeCloudInstTool) InstallTools() error {
 	cu.SetOSInterface(GetOSInterface())
 	cu.SetKubeEdgeVersion(cu.ToolVersion)
 
-	err := cu.InstallKubeEdge(types.CloudCore)
+	opts := &types.InstallOptions{
+		TarballPath:   cu.TarballPath,
+		ComponentType: types.CloudCore,
+	}
+
+	err := cu.InstallKubeEdge(*opts)
 	if err != nil {
 		return err
 	}
@@ -61,6 +68,10 @@ func (cu *KubeCloudInstTool) InstallTools() error {
 
 		if cu.AdvertiseAddress != "" {
 			cloudCoreConfig.Modules.CloudHub.AdvertiseAddress = strings.Split(cu.AdvertiseAddress, ",")
+		}
+
+		if cu.DNSName != "" {
+			cloudCoreConfig.Modules.CloudHub.DNSNames = strings.Split(cu.DNSName, ",")
 		}
 
 		if cu.ToolVersion.Major == 1 && cu.ToolVersion.Minor == 2 {
@@ -181,7 +192,9 @@ func (cu *KubeCloudInstTool) TearDown() error {
 	cu.SetKubeEdgeVersion(cu.ToolVersion)
 
 	//Kill cloudcore process
-	cu.KillKubeEdgeBinary(KubeCloudBinaryName)
+	if err := cu.KillKubeEdgeBinary(KubeCloudBinaryName); err != nil {
+		return err
+	}
 	// clean kubeedge namespace
 	err := cu.cleanNameSpace("kubeedge", cu.KubeConfig)
 	if err != nil {

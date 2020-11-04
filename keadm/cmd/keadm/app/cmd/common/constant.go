@@ -35,9 +35,6 @@ const (
 	// KubeEdge Node unique idenfitcation string
 	EdgeNodeName = "edgenode-name"
 
-	// KubeEdge interface name string
-	InterfaceName = "interfacename"
-
 	// KubeEdge remote-runtime-endpoint string
 	RemoteRuntimeEndpoint = "remote-runtime-endpoint"
 
@@ -73,4 +70,13 @@ const (
 	TokenSecretName = "tokensecret"
 
 	TokenDataName = "tokendata"
+
+	DomainName = "domainname"
+
+	// CGroupDriver is type of edgecore Cgroup
+	CGroupDriver = "cgroupdriver"
+
+	// TarballPath sets the temp directory path for KubeEdge tarball, if not exist, download it
+	// eg.  "/tmp/kubeedge" or "/etc/kubeedge" by default
+	TarballPath = "tarballpath"
 )

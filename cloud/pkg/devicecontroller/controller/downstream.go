@@ -34,6 +34,7 @@ import (
 	beehiveContext "github.com/kubeedge/beehive/pkg/core/context"
 	"github.com/kubeedge/beehive/pkg/core/model"
 	"github.com/kubeedge/kubeedge/cloud/pkg/apis/devices/v1alpha2"
+	"github.com/kubeedge/kubeedge/cloud/pkg/common/modules"
 	"github.com/kubeedge/kubeedge/cloud/pkg/devicecontroller/constants"
 	"github.com/kubeedge/kubeedge/cloud/pkg/devicecontroller/manager"
 	"github.com/kubeedge/kubeedge/cloud/pkg/devicecontroller/messagelayer"
@@ -276,25 +277,25 @@ func addDeviceModelAndVisitors(deviceModel *v1alpha2.DeviceModel, deviceProfile 
 			property.DataType = DataTypeString
 			property.DefaultValue = ppt.Type.String.DefaultValue
 		} else if ppt.Type.Double != nil {
-			property.AccessMode = string(ppt.Type.Int.AccessMode)
+			property.AccessMode = string(ppt.Type.Double.AccessMode)
 			property.DataType = DataTypeDouble
 			property.DefaultValue = ppt.Type.Double.DefaultValue
 			property.Maximum = ppt.Type.Double.Maximum
 			property.Minimum = ppt.Type.Double.Minimum
 			property.Unit = ppt.Type.Double.Unit
 		} else if ppt.Type.Float != nil {
-			property.AccessMode = string(ppt.Type.Int.AccessMode)
+			property.AccessMode = string(ppt.Type.Float.AccessMode)
 			property.DataType = DataTypeFloat
 			property.DefaultValue = ppt.Type.Float.DefaultValue
 			property.Maximum = ppt.Type.Float.Maximum
 			property.Minimum = ppt.Type.Float.Minimum
 			property.Unit = ppt.Type.Float.Unit
 		} else if ppt.Type.Boolean != nil {
-			property.AccessMode = string(ppt.Type.String.AccessMode)
+			property.AccessMode = string(ppt.Type.Boolean.AccessMode)
 			property.DataType = DataTypeBoolean
-			property.DefaultValue = ppt.Type.String.DefaultValue
+			property.DefaultValue = ppt.Type.Boolean.DefaultValue
 		} else if ppt.Type.Bytes != nil {
-			property.AccessMode = string(ppt.Type.String.AccessMode)
+			property.AccessMode = string(ppt.Type.Bytes.AccessMode)
 			property.DataType = DataTypeBytes
 		}
 		model.Properties = append(model.Properties, property)
@@ -396,7 +397,7 @@ func (dc *DownstreamController) deviceAdded(device *v1alpha2.Device) {
 			klog.Warningf("Built message resource failed with error: %s", err)
 			return
 		}
-		msg.BuildRouter(constants.DeviceControllerModuleName, constants.GroupTwin, resource, model.UpdateOperation)
+		msg.BuildRouter(modules.DeviceControllerModuleName, constants.GroupTwin, resource, model.UpdateOperation)
 
 		content := types.MembershipUpdate{AddDevices: []types.Device{
 			edgeDevice,
@@ -543,6 +544,8 @@ func (dc *DownstreamController) updateConfigMap(device *v1alpha2.Device) {
 		} else {
 			klog.Warning("Unsupported device protocol")
 		}
+		// add protocol common
+		deviceProtocol.ProtocolCommonConfig = device.Spec.Protocol.Common
 
 		// update the twins, data and protocol in deviceInstance
 		for _, devInst := range deviceProfile.DeviceInstances {
@@ -623,7 +626,7 @@ func (dc *DownstreamController) deviceUpdated(device *v1alpha2.Device) {
 						klog.Warningf("Built message resource failed with error: %s", err)
 						return
 					}
-					msg.BuildRouter(constants.DeviceControllerModuleName, constants.GroupTwin, resource, model.UpdateOperation)
+					msg.BuildRouter(modules.DeviceControllerModuleName, constants.GroupTwin, resource, model.UpdateOperation)
 					content := types.DeviceTwinUpdate{Twin: twin}
 					content.EventID = uuid.NewV4().String()
 					content.Timestamp = time.Now().UnixNano() / 1e6
@@ -733,7 +736,10 @@ func (dc *DownstreamController) deleteFromConfigMap(device *v1alpha2.Device) {
 		// 1. no device bound to it, as Data[DeviceProfileJSON] is "{}"
 		// 2. device instance created alone then removed, as Data[DeviceProfileJSON] is ""
 		if nodeConfigMap.Data[DeviceProfileJSON] == "{}" || nodeConfigMap.Data[DeviceProfileJSON] == "" {
-			dc.kubeClient.CoreV1().ConfigMaps(device.Namespace).Delete(context.Background(), nodeConfigMap.Name, metav1.DeleteOptions{})
+			if err := dc.kubeClient.CoreV1().ConfigMaps(device.Namespace).Delete(context.Background(), nodeConfigMap.Name, metav1.DeleteOptions{}); err != nil {
+				klog.Errorf("failed to delete config map %s in namespace %s", nodeConfigMap.Name, device.Namespace)
+				return
+			}
 			// remove from cache
 			dc.configMapManager.ConfigMap.Delete(device.Spec.NodeSelector.NodeSelectorTerms[0].MatchExpressions[0].Values[0])
 			return
@@ -833,7 +839,7 @@ func (dc *DownstreamController) deviceDeleted(device *v1alpha2.Device) {
 
 	if len(device.Spec.NodeSelector.NodeSelectorTerms) != 0 && len(device.Spec.NodeSelector.NodeSelectorTerms[0].MatchExpressions) != 0 && len(device.Spec.NodeSelector.NodeSelectorTerms[0].MatchExpressions[0].Values) != 0 {
 		resource, err := messagelayer.BuildResource(device.Spec.NodeSelector.NodeSelectorTerms[0].MatchExpressions[0].Values[0], "membership", "")
-		msg.BuildRouter(constants.DeviceControllerModuleName, constants.GroupTwin, resource, model.UpdateOperation)
+		msg.BuildRouter(modules.DeviceControllerModuleName, constants.GroupTwin, resource, model.UpdateOperation)
 
 		content := types.MembershipUpdate{RemoveDevices: []types.Device{
 			edgeDevice,

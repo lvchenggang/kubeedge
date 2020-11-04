@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"github.com/kubeedge/kubeedge/cloud/pkg/common/modules"
 	"sort"
 	"time"
 
@@ -166,7 +167,7 @@ func (uc *UpstreamController) dispatchMessage() {
 			continue
 		}
 
-		klog.Infof("dispatch message ID: %s", msg.GetID())
+		klog.V(5).Infof("dispatch message ID: %s", msg.GetID())
 		klog.V(5).Infof("dispatch message content: %++v", msg)
 
 		resourceType, err := messagelayer.GetResourceType(msg)
@@ -174,9 +175,9 @@ func (uc *UpstreamController) dispatchMessage() {
 			klog.Warningf("parse message: %s resource type with error: %s", msg.GetID(), err)
 			continue
 		}
-		klog.Infof("message: %s, resource type is: %s", msg.GetID(), resourceType)
+
 		operationType := msg.GetOperation()
-		klog.Infof("message: %s, operation type is: %s", msg.GetID(), operationType)
+		klog.V(5).Infof("message: %s, operation type is: %s", msg.GetID(), operationType)
 
 		switch resourceType {
 		case model.ResourceTypeNodeStatus:
@@ -198,17 +199,19 @@ func (uc *UpstreamController) dispatchMessage() {
 		case common.ResourceTypeVolumeAttachment:
 			uc.volumeAttachmentChan <- msg
 		case model.ResourceTypeNode:
-			switch operationType {
+			switch msg.GetOperation() {
 			case model.QueryOperation:
 				uc.queryNodeChan <- msg
 			case model.UpdateOperation:
 				uc.updateNodeChan <- msg
 			default:
-				klog.Errorf("message: %s, operation type: %s unsupported", msg.GetID(), operationType)
+				klog.Errorf("message: %s, operation type: %s unsupported", msg.GetID(), msg.GetOperation())
 			}
 		case model.ResourceTypePod:
 			if msg.GetOperation() == model.DeleteOperation {
 				uc.podDeleteChan <- msg
+			} else {
+				klog.Errorf("message: %s, operation type: %s unsupported", msg.GetID(), msg.GetOperation())
 			}
 		default:
 			klog.Errorf("message: %s, resource type: %s unsupported", msg.GetID(), resourceType)
@@ -223,7 +226,7 @@ func (uc *UpstreamController) updatePodStatus() {
 			klog.Warning("stop updatePodStatus")
 			return
 		case msg := <-uc.podStatusChan:
-			klog.Infof("message: %s, operation is: %s, and resource is: %s", msg.GetID(), msg.GetOperation(), msg.GetResource())
+			klog.V(5).Infof("message: %s, operation is: %s, and resource is: %s", msg.GetID(), msg.GetOperation(), msg.GetResource())
 
 			namespace, podStatuses := uc.unmarshalPodStatusMessage(msg)
 			switch msg.GetOperation() {
@@ -248,7 +251,7 @@ func (uc *UpstreamController) updatePodStatus() {
 						pod := &v1.Pod{}
 						pod.Namespace, pod.Name = namespace, podStatus.Name
 						delMsg.Content = pod
-						delMsg.BuildRouter(constants.EdgeControllerModuleName, constants.GroupResource, resource, model.DeleteOperation)
+						delMsg.BuildRouter(modules.EdgeControllerModuleName, constants.GroupResource, resource, model.DeleteOperation)
 						if err := uc.messageLayer.Send(*delMsg); err != nil {
 							klog.Warningf("Send message failed with error: %s, operation: %s, resource: %s", err, delMsg.GetOperation(), delMsg.GetResource())
 						} else {
@@ -300,7 +303,7 @@ func (uc *UpstreamController) updatePodStatus() {
 					if updatedPod, err := uc.kubeClient.CoreV1().Pods(getPod.Namespace).UpdateStatus(context.Background(), getPod, metaV1.UpdateOptions{}); err != nil {
 						klog.Warningf("message: %s, update pod status failed with error: %s, namespace: %s, name: %s", msg.GetID(), err, getPod.Namespace, getPod.Name)
 					} else {
-						klog.Infof("message: %s, update pod status successfully, namespace: %s, name: %s", msg.GetID(), updatedPod.Namespace, updatedPod.Name)
+						klog.V(5).Infof("message: %s, update pod status successfully, namespace: %s, name: %s", msg.GetID(), updatedPod.Namespace, updatedPod.Name)
 						if updatedPod.DeletionTimestamp != nil && (status.Phase == v1.PodSucceeded || status.Phase == v1.PodFailed) {
 							if uc.isPodNotRunning(status.ContainerStatuses) {
 								if err := uc.kubeClient.CoreV1().Pods(updatedPod.Namespace).Delete(context.Background(), updatedPod.Name, *metaV1.NewDeleteOptions(0)); err != nil {
@@ -333,7 +336,7 @@ func (uc *UpstreamController) updateNodeStatus() {
 			klog.Warning("stop updateNodeStatus")
 			return
 		case msg := <-uc.nodeStatusChan:
-			klog.Infof("message: %s, operation is: %s, and resource is %s", msg.GetID(), msg.GetOperation(), msg.GetResource())
+			klog.V(5).Infof("message: %s, operation is: %s, and resource is %s", msg.GetID(), msg.GetOperation(), msg.GetResource())
 
 			var data []byte
 			switch msg.Content.(type) {
@@ -473,7 +476,7 @@ func (uc *UpstreamController) updateNodeStatus() {
 					klog.Warningf("Message: %s process failure, build message resource failed with error: %s", msg.GetID(), err)
 					continue
 				}
-				resMsg.BuildRouter(constants.EdgeControllerModuleName, constants.GroupResource, resource, model.ResponseOperation)
+				resMsg.BuildRouter(modules.EdgeControllerModuleName, constants.GroupResource, resource, model.ResponseOperation)
 				if err = uc.messageLayer.Response(*resMsg); err != nil {
 					klog.Warningf("Message: %s process failure, response failed with error: %s", msg.GetID(), err)
 					continue
@@ -565,7 +568,7 @@ func queryInner(uc *UpstreamController, msg model.Message, queryType string) {
 		if err != nil {
 			klog.Warningf("message: %s process failure, build message resource failed with error: %s", msg.GetID(), err)
 		}
-		resMsg.BuildRouter(constants.EdgeControllerModuleName, constants.GroupResource, resource, model.ResponseOperation)
+		resMsg.BuildRouter(modules.EdgeControllerModuleName, constants.GroupResource, resource, model.ResponseOperation)
 		err = uc.messageLayer.Response(*resMsg)
 		if err != nil {
 			klog.Warningf("message: %s process failure, response failed with error: %s", msg.GetID(), err)
@@ -668,7 +671,7 @@ func (uc *UpstreamController) updateNode() {
 			klog.Warning("stop updateNode")
 			return
 		case msg := <-uc.updateNodeChan:
-			klog.Infof("message: %s, operation is: %s, and resource is %s", msg.GetID(), msg.GetOperation(), msg.GetResource())
+			klog.V(5).Infof("message: %s, operation is: %s, and resource is %s", msg.GetID(), msg.GetOperation(), msg.GetResource())
 			noderequest := &v1.Node{}
 
 			var data []byte
@@ -739,7 +742,7 @@ func (uc *UpstreamController) updateNode() {
 					klog.Warningf("Message: %s process failure, build message resource failed with error: %s", msg.GetID(), err)
 					continue
 				}
-				resMsg.BuildRouter(constants.EdgeControllerModuleName, constants.GroupResource, resource, model.ResponseOperation)
+				resMsg.BuildRouter(modules.EdgeControllerModuleName, constants.GroupResource, resource, model.ResponseOperation)
 				if err = uc.messageLayer.Response(*resMsg); err != nil {
 					klog.Warningf("Message: %s process failure, response failed with error: %s", msg.GetID(), err)
 					continue
@@ -761,7 +764,7 @@ func (uc *UpstreamController) deletePod() {
 			klog.Warning("stop deletePod")
 			return
 		case msg := <-uc.podDeleteChan:
-			klog.Infof("message: %s, operation is: %s, and resource is %s", msg.GetID(), msg.GetOperation(), msg.GetResource())
+			klog.V(5).Infof("message: %s, operation is: %s, and resource is %s", msg.GetID(), msg.GetOperation(), msg.GetResource())
 
 			namespace, err := messagelayer.GetNamespace(msg)
 			if err != nil {
@@ -929,7 +932,7 @@ func (uc *UpstreamController) nodeMsgResponse(nodeName, namespace, content strin
 		return
 	}
 
-	resMsg.BuildRouter(constants.EdgeControllerModuleName, constants.GroupResource, resource, model.ResponseOperation)
+	resMsg.BuildRouter(modules.EdgeControllerModuleName, constants.GroupResource, resource, model.ResponseOperation)
 	if err = uc.messageLayer.Response(*resMsg); err != nil {
 		klog.Warningf("Response message: %s failed, response failed with error: %s", msg.GetID(), err)
 		return
