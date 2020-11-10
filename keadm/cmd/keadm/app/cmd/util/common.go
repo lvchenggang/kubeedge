@@ -17,17 +17,18 @@ limitations under the License.
 package util
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
-
-	"k8s.io/klog"
 
 	"github.com/blang/semver"
 	"github.com/spf13/pflag"
@@ -35,8 +36,10 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/klog"
 
 	types "github.com/kubeedge/kubeedge/keadm/cmd/keadm/app/cmd/common"
+	"github.com/kubeedge/kubeedge/pkg/apis/componentconfig/edgecore/v1alpha1"
 )
 
 //Constants used by installers
@@ -47,7 +50,10 @@ const (
 	CentOSType     = "centos"
 
 	KubeEdgeDownloadURL          = "https://github.com/kubeedge/kubeedge/releases/download"
-	EdgeCoreServiceFileURL       = "https://raw.githubusercontent.com/kubeedge/kubeedge/release-%s/build/tools/%s"
+	OldEdgeServiceFile           = "edge.service"
+	EdgeServiceFile              = "edgecore.service"
+	CloudServiceFile             = "cloudcore.service"
+	ServiceFileURLFormat         = "https://raw.githubusercontent.com/kubeedge/kubeedge/release-%s/build/tools/%s"
 	KubeEdgePath                 = "/etc/kubeedge/"
 	KubeEdgeUsrBinPath           = "/usr/local/bin"
 	KubeEdgeConfPath             = KubeEdgePath + "kubeedge/edge/conf"
@@ -75,6 +81,14 @@ const (
 
 	latestReleaseVersionURL = "https://kubeedge.io/latestversion"
 	RetryTimes              = 5
+
+	UnitCore = "core"
+	UnitMB   = "MB"
+	UnitGB   = "GB"
+
+	KB int = 1024
+	MB int = KB * 1024
+	GB int = MB * 1024
 )
 
 //AddToolVals gets the value and default values of each flags and collects them in temporary cache
@@ -394,36 +408,8 @@ func installKubeEdge(options types.InstallOptions, arch string, version semver.V
 		return nil
 	}
 
-	/*
-		When installing edgecore, if the version is >= 1.1,
-		download the edgecore.service file from the KubeEdge/build/tools/ and place it in /etc/kubeedge/ acc.
-	*/
-	if options.ComponentType == types.EdgeCore {
-		strippedVersion := fmt.Sprintf("%d.%d", version.Major, version.Minor)
-
-		//	No need to download if the version is less than 1.1 (or 1.1.0)
-		if version.GE(semver.MustParse("1.1.0")) {
-			try := 0
-
-			edgecoreServiceFileName := "edgecore.service"
-
-			if version.EQ(semver.MustParse("1.1.0")) {
-				edgecoreServiceFileName = "edge.service"
-			}
-
-			urlForServiceFile := fmt.Sprintf(EdgeCoreServiceFileURL, strippedVersion, edgecoreServiceFileName)
-			for ; try < downloadRetryTimes; try++ {
-				cmdStr := fmt.Sprintf("cd %s && sudo -E wget -k --no-check-certificate %s", KubeEdgePath, urlForServiceFile)
-				_, err := runCommandWithStdout(cmdStr)
-				if err != nil {
-					return err
-				}
-				break
-			}
-			if try == downloadRetryTimes {
-				return fmt.Errorf("failed to download %s", edgecoreServiceFileName)
-			}
-		}
+	if err := downloadServiceFile(options.ComponentType, version, KubeEdgePath); err != nil {
+		return fmt.Errorf("fail to download service file,error:{%s}", err.Error())
 	}
 
 	// Compatible with 1.0.0
@@ -667,6 +653,98 @@ func retryDownload(filename, checksumFilename string, version semver.Version, ta
 	return nil
 }
 
+// Compressed folders or files
+func Compress(tarName string, paths []string) (err error) {
+	tarFile, err := os.Create(tarName)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		err = tarFile.Close()
+	}()
+
+	absTar, err := filepath.Abs(tarName)
+	if err != nil {
+		return err
+	}
+
+	// enable compression if file ends in .gz
+	tw := tar.NewWriter(tarFile)
+	if strings.HasSuffix(tarName, ".gz") || strings.HasSuffix(tarName, ".gzip") {
+		gz := gzip.NewWriter(tarFile)
+		defer gz.Close()
+		tw = tar.NewWriter(gz)
+	}
+	defer tw.Close()
+
+	// walk each specified path and add encountered file to tar
+	for _, path := range paths {
+		// validate path
+		path = filepath.Clean(path)
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+		if absPath == absTar {
+			fmt.Printf("tar file %s cannot be the source\n", tarName)
+			continue
+		}
+		if absPath == filepath.Dir(absTar) {
+			fmt.Printf("tar file %s cannot be in source %s\n", tarName, absPath)
+			continue
+		}
+
+		walker := func(file string, finfo os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+
+			// fill in header info using func FileInfoHeader
+			hdr, err := tar.FileInfoHeader(finfo, finfo.Name())
+			if err != nil {
+				return err
+			}
+
+			relFilePath := file
+			if filepath.IsAbs(path) {
+				relFilePath, err = filepath.Rel(path, file)
+				if err != nil {
+					return err
+				}
+			}
+			// ensure header has relative file path
+			hdr.Name = relFilePath
+
+			if err := tw.WriteHeader(hdr); err != nil {
+				return err
+			}
+			// if path is a dir, dont continue
+			if finfo.Mode().IsDir() {
+				return nil
+			}
+
+			// add file to tar
+			srcFile, err := os.Open(file)
+			if err != nil {
+				return err
+			}
+			defer srcFile.Close()
+			_, err = io.Copy(tw, srcFile)
+			if err != nil {
+				return err
+			}
+			return nil
+		}
+
+		// build tar
+		if err := filepath.Walk(path, walker); err != nil {
+			fmt.Printf("failed to add %s to tar: %s\n", path, err)
+		}
+	}
+	return nil
+}
+
 func askForconfirm() (bool, error) {
 	var s string
 
@@ -684,4 +762,126 @@ func askForconfirm() (bool, error) {
 	} else {
 		return false, fmt.Errorf("Invalid Input")
 	}
+}
+
+// Execute shell script and filter
+func ExecShellFilter(c string) (string, error) {
+	cmd := exec.Command("sh", "-c", c)
+	o, err := cmd.Output()
+	str := strings.Replace(string(o), " ", "", -1)
+	str = strings.Replace(str, "\n", "", -1)
+	if err != nil {
+		return str, fmt.Errorf("exec fail: %s, %s", c, err)
+	}
+	return str, nil
+}
+
+func FileExists(path string) bool {
+	_, err := os.Stat(path)
+	if err != nil {
+		return os.IsExist(err)
+	}
+	return true
+}
+
+func ParseEdgecoreConfig(edgecorePath string) (*v1alpha1.EdgeCoreConfig, error) {
+	edgeCoreConfig := v1alpha1.NewDefaultEdgeCoreConfig()
+	if err := edgeCoreConfig.Parse(edgecorePath); err != nil {
+		return nil, err
+	}
+	return edgeCoreConfig, nil
+}
+
+// Determine if it is in the array
+func IsContain(items []string, item string) bool {
+	for _, eachItem := range items {
+		if eachItem == item {
+			return true
+		}
+	}
+	return false
+}
+
+//print fail
+func PrintFail(cmd string, s string) {
+	v := fmt.Sprintf("|%s %s failed|", s, cmd)
+	printResult(v)
+}
+
+//print success
+func PrintSuccedd(cmd string, s string) {
+	v := fmt.Sprintf("|%s %s succeed|", s, cmd)
+	printResult(v)
+}
+
+func printResult(s string) {
+	line := "|"
+	if len(s) > 2 {
+		for i := 0; i < len(s)-2; i++ {
+			line = line + "-"
+		}
+		line = line + "|"
+	}
+
+	fmt.Println("")
+	fmt.Println(line)
+	fmt.Println(s)
+	fmt.Println(line)
+}
+
+//IsKubeEdgeProcessRunning checks if the given process is running or not
+func IsProcessRunningWithFilter(proc string, filter string) (bool, error) {
+	procRunning := fmt.Sprintf("ps aux | grep '[%s]%s'|grep -v '%s' | awk '{print $2}'", proc[0:1], proc[1:], filter)
+	stdout, err := runCommandWithStdout(procRunning)
+	if err != nil {
+		return false, err
+	}
+	if stdout != "" {
+		return true, nil
+	}
+
+	return false, nil
+}
+
+func downloadServiceFile(componentType types.ComponentType, version semver.Version, storeDir string) error {
+	// No need to download if
+	// 1. the systemd not exists
+	// 2. the version is less than 1.1.0
+	// 3. the service file already exists
+	if hasSystemd() && version.GE(semver.MustParse("1.1.0")) {
+		var ServiceFileName string
+		switch componentType {
+		case types.CloudCore:
+			ServiceFileName = CloudServiceFile
+			if version.EQ(semver.MustParse("1.1.0")) {
+				fmt.Println("[Run as service]skip download service file for cloudcore-v1.1.0, not support")
+				return nil
+			}
+		case types.EdgeCore:
+			ServiceFileName = EdgeServiceFile
+			if version.EQ(semver.MustParse("1.1.0")) {
+				ServiceFileName = OldEdgeServiceFile
+			}
+		default:
+			return fmt.Errorf("component type %s not support", componentType)
+		}
+		ServiceFilePath := storeDir + "/" + ServiceFileName
+		strippedVersion := fmt.Sprintf("%d.%d", version.Major, version.Minor)
+		ServiceFileURL := fmt.Sprintf(ServiceFileURLFormat, strippedVersion, ServiceFileName)
+		if _, err := os.Stat(ServiceFilePath); err != nil {
+			if os.IsNotExist(err) {
+				cmdStr := fmt.Sprintf("cd %s && sudo -E wget -t %d -k --no-check-certificate %s", storeDir, RetryTimes, ServiceFileURL)
+				fmt.Printf("[Run as service] start to download service file for %s\n", componentType)
+				if _, err := runCommandWithStdout(cmdStr); err != nil {
+					return err
+				}
+				fmt.Printf("[Run as service] success to download service file for %s\n", componentType)
+			} else {
+				return err
+			}
+		} else {
+			fmt.Printf("[Run as service] service file already exisits in %s, skip download\n", ServiceFilePath)
+		}
+	}
+	return nil
 }
