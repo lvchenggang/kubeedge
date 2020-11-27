@@ -11,9 +11,6 @@ const (
 	// SyncController
 	DefaultContextSendModuleName = "cloudhub"
 
-	// DeviceTwin
-	DeviceTwinModuleName = "twin"
-
 	// NodeName is for the clearer log of cloudcore.
 	NodeName = "NodeName"
 
@@ -74,6 +71,7 @@ const (
 
 	// MetaManager
 	DefaultPodStatusSyncInterval = 60
+	DefaultRemoteQueryTimeout    = 60
 
 	// Config
 	DefaultKubeContentType         = "application/vnd.kubernetes.protobuf"
